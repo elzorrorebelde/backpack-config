@@ -30,7 +30,7 @@
  (eldoc box)
  (dired icons)
  dape
- org-remark
+ (org-remark info eww)
 
  :checkers
  spellchecking
