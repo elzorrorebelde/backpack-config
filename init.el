@@ -18,7 +18,7 @@
  mu4e
 
  :ai
- anvil
+ (anvil shell-filter context defs mu4e elisp cron http worklog memory)
  eca
 
  :term
@@ -29,6 +29,8 @@
  direnv
  (eldoc box)
  (dired icons)
+ dape
+ org-remark
 
  :checkers
  spellchecking
@@ -67,7 +69,7 @@
  kdl
 
  ;; modos mayores para cosas muy "niche"
- hyprland
+ mermaid
 
  ;; modos mayores para escribir prosa
  latex
@@ -75,7 +77,7 @@
  markdown
 
  ;; org-mode y amigos
- (org roam noter)
+ (org roam)
 
  :config
  (default no-splash hide-tool-bar hide-menu-bar))
