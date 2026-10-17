@@ -23,7 +23,7 @@
 		 :query ,(mu4e-make-query `(and (date (today .. now)) (not ,email-query-mailing-lists)))))))
 
 (with-eval-after-load "mu4e"
-  (setq mu4e-get-mail-command "mbsync --all") ;; descarga y sube correos
+  (setq mu4e-get-mail-command "mbsync-safe --all") ;; descarga y sube correos con flock
   (setq mu4e-update-interval nil) ;; quiero manejar el correo de manera manual
 
   (setq mu4e-headers-date-format "%b %d, %Y")
