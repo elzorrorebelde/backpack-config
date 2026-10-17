@@ -13,6 +13,7 @@
  marginalia
  embark
  cape
+ templates
 
  :email
  mu4e
@@ -31,6 +32,7 @@
  (dired icons)
  dape
  (org-remark info eww)
+ pdf
 
  :checkers
  spellchecking
@@ -70,9 +72,10 @@
 
  ;; modos mayores para cosas muy "niche"
  mermaid
+ (qml lsp)
 
  ;; modos mayores para escribir prosa
- latex
+ (latex lsp refs)
  (typst lsp)
  markdown
 
