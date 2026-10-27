@@ -86,6 +86,9 @@
  (default no-splash hide-tool-bar hide-menu-bar))
 ;; fin de macro gear!
 
+;; mis plantillas de tempel estan en un solo archivo
+(setq tempel-path (expand-file-name "templates" backpack-user-dir))
+
 (set-face-attribute 'default nil :family "Iosevka Nerd Font Mono" :height 160)
 
 ;; Fuente variable (para textos con variable-pitch)

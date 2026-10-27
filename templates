@@ -1,0 +1,37 @@
+;; -*- mode: lisp-data -*-
+
+typst-ts-mode
+
+(uned-formato
+ "#set page(" n
+ "  paper: \"us-letter\"," n
+ "  margin: 2.54cm," n
+ "  numbering: \"1\"," n
+ "  number-align: top + right," n
+ ")" n n
+ "#set text(" n
+ "  font: \"Times New Roman\"," n
+ "  size: 12pt," n
+ ")" n n
+ "#set par(" n
+ "  leading: 1em," n
+ "  first-line-indent: 1.27cm," n
+ "  justify: false," n
+ ")" n n
+ "#set heading(numbering: none)" n n
+ :doc "Formato especificado por la Universidad Estatal a Distancia para algunas tareas")
+
+go-mode go-ts-mode
+
+(iferr
+ "if err != nil {" n>
+ "return err" n>
+ "}" > n
+ :doc "if err != nil { return err }")
+
+(iferrl
+ "if err != nil {" n>
+ "logrus.WithError(err).Error(\"" p "\")" n>
+ "return err" n>
+ "}" > n
+ :doc "if err != nil { log + return err }")
