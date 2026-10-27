@@ -18,3 +18,10 @@
   (doom-modeline-bar-width		.	0)
   (doom-modeline-enable-word-count	.	t)
   (doom-modeline-env-version		.	t))
+
+(leaf dm-log
+  :ensure (dm-log :host github :repo "shackra/dm-log")
+  :after org
+  :commands dm-log
+  :custom
+  (dm-log-campaigns-directory . "~/Documentos/OSR/Magía y Acero/campañas"))

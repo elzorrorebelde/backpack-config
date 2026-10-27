@@ -98,13 +98,6 @@
 
 ;;(setq org-roam-directory (file-truename "~/Documentos/org"))
 
-(leaf dm-log
-  :ensure (dm-log :host github :repo "shackra/dm-log")
-  :after org
-  :commands dm-log
-  :custom
-  (dm-log-campaigns-directory . "~/Documentos/OSR/Magía y Acero/campañas"))
-
 ;; Ajustes para anvil.el
 (setq anvil-mu4e-from "jorge@esavara.cr")
 (setq anvil-mu4e-allow-send t)
