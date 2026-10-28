@@ -6,7 +6,7 @@
  diff-hl
 
  :completion
- (corfu auto-for-prog auto-for-text auto-idle)
+ (corfu auto-for-prog auto-for-text)
  (vertico quick repeat suspend)
  (consult eglot dir project-extra todo)
  orderless
