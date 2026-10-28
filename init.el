@@ -106,7 +106,7 @@
 (setq anvil-mu4e-allow-send t)
 (setq anvil-mu4e-send-allowlist '(".*"))
 
-(add-to-list 'trusted-content "/home/jorge/code/rad/goimapnotify/")
+(add-to-list 'trusted-content "~/code/rad/goimapnotify/")
 
 ;; email — extensions for mu4e
 (load-file (expand-file-name "email.el" backpack-user-dir))
