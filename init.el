@@ -28,6 +28,7 @@
  :tools
  (magit difftastic)
  direnv
+ devenv
  (eldoc box)
  (dired icons)
  dape
