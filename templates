@@ -6,16 +6,20 @@ typst-ts-mode
  "#set page(" n
  "  paper: \"us-letter\"," n
  "  margin: 2.54cm," n
- "  numbering: \"1\"," n
- "  number-align: top + right," n
+ "  header: context {" n
+ "    let n = counter(page).get().first()" n
+ "    if n > 1 { align(right, text(weight: \"regular\")[#n]) }" n
+ "  }," n
  ")" n n
  "#set text(" n
- "  font: \"Times New Roman\"," n
+ "  font: (\"Times New Roman\", \"Liberation Serif\")," n
  "  size: 12pt," n
+ "  lang: \"es\"," n
  ")" n n
  "#set par(" n
- "  leading: 1em," n
- "  first-line-indent: 1.27cm," n
+ "  leading: 1.65em," n
+ "  spacing: 1.65em," n
+ "  first-line-indent: (amount: 1.27cm, all: true)," n
  "  justify: false," n
  ")" n n
  "#set heading(numbering: none)" n n
