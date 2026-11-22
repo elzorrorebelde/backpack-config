@@ -25,3 +25,7 @@
   :commands dm-log
   :custom
   (dm-log-campaigns-directory . "~/Documentos/OSR/Magía y Acero/campañas"))
+
+(leaf activity-watch-mode
+  :ensure (activity-watch-mode :host github :repo "pauldub/activity-watch-mode")
+  :global-minor-mode global-activity-watch-mode)
