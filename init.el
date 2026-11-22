@@ -63,7 +63,7 @@
  ;; lenguajes de programación para configurar cosas
  (nix lsp)
  (terraform lsp doc)
- emacs-lisp
+ (emacs-lisp tree-guide)
 
  ;; modos mayores para archivos de datos
  (json lsp)
