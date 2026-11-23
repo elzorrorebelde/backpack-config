@@ -5,8 +5,9 @@
 
 ;;; Commentary:
 ;; A small JavaScript-derived major mode for Rustel scores.  It starts
-;; `rustel play FILE --watch --ui-events' and highlights source ranges for
-;; events currently sounding.  Rustel must be on `exec-path'.
+;; `rustel play FILE --watch --ui-events', highlights sounding source ranges,
+;; and draws inline SVG piano rolls for `._pianoroll()'.  Rustel must be on
+;; `exec-path'.
 ;;
 ;; This is a first experiment, not a complete client for rustel-studio or a
 ;; stable implementation of Rustel's currently hidden --ui-events protocol.
@@ -18,6 +19,7 @@
 (require 'js)
 (require 'seq)
 (require 'subr-x)
+(require 'svg)
 
 (defgroup rustel nil
   "Editing and live playback of Rustel/Strudel scores."
@@ -36,6 +38,22 @@ the clock without opening an audio device."
   :type '(repeat string)
   :group 'rustel)
 
+(defcustom rustel-visual-refresh-rate 60
+  "Target redraw rate for inline Rustel visuals.
+Emacs timers can be delayed while Emacs is busy, so this is a target."
+  :type '(choice (const 30) (const 60))
+  :group 'rustel)
+
+(defcustom rustel-pianoroll-height 150
+  "Height in pixels of inline Rustel piano-roll images."
+  :type 'integer
+  :group 'rustel)
+
+(defcustom rustel-pianoroll-cycles 4
+  "Number of cycles shown in each inline piano roll."
+  :type 'number
+  :group 'rustel)
+
 (defface rustel-active-face
   '((t :inherit highlight))
   "Face used for source ranges of notes that are sounding."
@@ -47,6 +65,7 @@ the clock without opening an audio device."
 (defvar-local rustel--process nil)
 (defvar-local rustel--timer nil)
 (defvar-local rustel--overlays nil)
+(defvar-local rustel--visual-overlays nil)
 (defvar-local rustel--source-bytes nil)
 (defvar-local rustel--source-revision nil)
 (defvar-local rustel--source-coding nil)
@@ -106,14 +125,22 @@ the clock without opening an audio device."
   (mapc #'delete-overlay rustel--overlays)
   (setq rustel--overlays nil))
 
+(defun rustel--clear-visual-overlays ()
+  "Remove this buffer's inline graphic overlays."
+  (dolist (entry rustel--visual-overlays)
+    (delete-overlay (car entry)))
+  (setq rustel--visual-overlays nil))
+
 (defun rustel--after-change (&rest _ignored)
   "Do not leave live markers attached to text that has since changed."
-  (rustel--clear-overlays))
+  (rustel--clear-overlays)
+  (rustel--clear-visual-overlays))
 
 (defun rustel--after-save ()
   "Refresh the source revision after a score is saved."
   (rustel--refresh-source-snapshot)
-  (rustel--clear-overlays))
+  (rustel--clear-overlays)
+  (rustel--clear-visual-overlays))
 
 (defun rustel--json-object (line)
   "Parse one LINE of Rustel NDJSON as an alist, or return nil."
@@ -125,6 +152,174 @@ the clock without opening an audio device."
                            :null-object nil
                            :false-object :false)
       (json-parse-error nil))))
+
+(defun rustel--visual-anchor (position)
+  "Return (POSITION . LEADING-NEWLINE) for a visual after the source line."
+  (save-excursion
+    (goto-char position)
+    (end-of-line)
+    (if (eq (char-after) ?\n)
+        (cons (1+ (point)) nil)
+      (cons (point) (not (bolp))))))
+
+(defun rustel--install-visual-overlays (process buffer)
+  "Create image anchors for supported visuals in PROCESS's current layout."
+  (with-current-buffer buffer
+    (dolist (visual (process-get process 'rustel-visuals))
+      (when (equal (alist-get 'kind visual) "pianoroll")
+        (let* ((end (rustel--byte-to-position (alist-get 'to visual)))
+               (anchor (and end (rustel--visual-anchor end))))
+          (when anchor
+            (let ((overlay (make-overlay (car anchor) (car anchor) nil t t)))
+              (overlay-put overlay 'priority 80)
+              (overlay-put overlay 'rustel-leading-newline (cdr anchor))
+              (push (cons overlay visual) rustel--visual-overlays))))))))
+
+(defun rustel--graphics-window (buffer)
+  "Return a visible graphical window for BUFFER that can display SVGs."
+  (seq-find (lambda (window)
+              (let ((frame (window-frame window)))
+                (and (display-graphic-p frame)
+                     (display-images-p frame)
+                     (image-type-available-p 'svg))))
+            (get-buffer-window-list buffer nil t)))
+
+(defun rustel--svg-face-color (face attribute frame fallback)
+  "Return ATTRIBUTE of FACE on FRAME, or FALLBACK if it is unspecified."
+  (let ((color (face-attribute face attribute frame t)))
+    (if (and (stringp color)
+             (not (member color '("unspecified" "unspecified-bg" "unspecified-fg"))))
+        color
+      fallback)))
+
+(defun rustel--pianoroll-cycle-count (visual)
+  "Read VISUAL's literal cycles option, or use the mode setting."
+  (let ((options (alist-get 'options visual)))
+    (if (and (stringp options)
+             (string-match
+              "\\_<cycles\\_>[ \t\n]*:[ \t\n]*\\([0-9]+\\(?:\\.[0-9]+\\)?\\)"
+              options))
+        (max 0.25 (min 64.0 (string-to-number (match-string 1 options))))
+      (max 0.25 (min 64.0 rustel-pianoroll-cycles)))))
+
+(defun rustel--current-cycle (process now)
+  "Estimate the score cycle at host time NOW from PROCESS's last clock batch."
+  (let ((cycle (process-get process 'rustel-cycle))
+        (cps (process-get process 'rustel-cps))
+        (device-time (process-get process 'rustel-device-time))
+        (offset (process-get process 'rustel-offset)))
+    (when (and (numberp cycle) (numberp cps) (> cps 0)
+               (numberp device-time) (numberp offset))
+      (+ cycle (* (- (- now offset) device-time) cps)))))
+
+(defun rustel--pianoroll-image (process visual now width frame)
+  "Build a small SVG piano roll for VISUAL at host time NOW and pixel WIDTH."
+  (let* ((cycles (rustel--pianoroll-cycle-count visual))
+         (cycle-now (or (rustel--current-cycle process now) 0.0))
+         (cycle-begin (- cycle-now (/ cycles 2.0)))
+         (cycle-end (+ cycle-begin cycles))
+         (slot (alist-get 'slot visual))
+         (events
+          (seq-filter
+           (lambda (event)
+             (and (numberp (plist-get event :pitch))
+                  (numberp (plist-get event :cycle-begin))
+                  (numberp (plist-get event :cycle-end))
+                  (> (plist-get event :cycle-end) cycle-begin)
+                  (< (plist-get event :cycle-begin) cycle-end)
+                  (or (null slot)
+                      (and (integerp (plist-get event :visual-mask))
+                           (/= 0 (logand (plist-get event :visual-mask)
+                                         (ash 1 slot)))))))
+           (process-get process 'rustel-events)))
+         (pitches (mapcar (lambda (event) (plist-get event :pitch)) events))
+         (low (if pitches (* 12 (floor (/ (apply #'min pitches) 12.0))) 48))
+         (high (if pitches (* 12 (1+ (floor (/ (apply #'max pitches) 12.0)))) 84))
+         (high (max (1+ low) high))
+         (height (max 80 rustel-pianoroll-height))
+         (left 38) (right 10) (top 24) (bottom 12)
+         (plot-width (- width left right))
+         (plot-height (- height top bottom))
+         (row-height (/ (float plot-height) (- high low)))
+         (background (rustel--svg-face-color 'default :background frame "#17191f"))
+         (foreground (rustel--svg-face-color 'default :foreground frame "#e0e0e0"))
+         (grid (rustel--svg-face-color 'shadow :foreground frame "#454955"))
+         (note-color (rustel--svg-face-color 'font-lock-function-name-face
+                                             :foreground frame "#72b7ff"))
+         (active-color (rustel--svg-face-color 'highlight :background frame "#ffd75f"))
+         (svg (svg-create width height)))
+    (svg-rectangle svg 0 0 width height :fill background)
+    (svg-text svg "Rustel · pianoroll" :x left :y 16 :font-size 11
+              :font-family "sans-serif" :fill foreground)
+    ;; Semitone lanes, with a stronger line and octave label at each C.
+    (let ((pitch low))
+      (while (<= pitch high)
+        (let ((y (- (+ top plot-height) (* row-height (- pitch low)))))
+          (svg-line svg left y (- width right) y
+                    :stroke-color (if (= (% pitch 12) 0) grid background)
+                    :stroke-width (if (= (% pitch 12) 0) 1.0 0.4))
+          (when (= (% pitch 12) 0)
+            (svg-text svg (format "C%d" (- (floor pitch 12) 1))
+                      :x 3 :y (+ y 3) :font-size 9
+                      :font-family "monospace" :fill foreground)))
+        (setq pitch (1+ pitch))))
+    ;; Cycle grid and labels.
+    (let ((cycle (floor cycle-begin)))
+      (while (<= cycle (ceiling cycle-end))
+        (let ((x (+ left (* plot-width (/ (- cycle cycle-begin) cycles)))))
+          (when (and (>= x left) (<= x (- width right)))
+            (svg-line svg x top x (+ top plot-height)
+                      :stroke-color grid :stroke-width 1)
+            (svg-text svg (number-to-string cycle) :x (+ x 2)
+                      :y (- height 2) :font-size 8
+                      :font-family "monospace" :fill foreground)))
+        (setq cycle (1+ cycle))))
+    ;; Notes are rectangles in cycle/pitch space; the playhead is interpolated
+    ;; between Rustel's clock batches rather than stepped with the event stream.
+    (dolist (event events)
+      (let* ((begin (plist-get event :cycle-begin))
+             (end (plist-get event :cycle-end))
+             (pitch (plist-get event :pitch))
+             (x1 (+ left (* plot-width (/ (- (max cycle-begin begin) cycle-begin) cycles))))
+             (x2 (+ left (* plot-width (/ (- (min cycle-end end) cycle-begin) cycles))))
+             (y (+ top (- plot-height (* row-height (1+ (- pitch low))))
+                  (* row-height 0.12)))
+             (note-height (max 2 (* row-height 0.76)))
+             (color (if (and (<= (plist-get event :start) now)
+                             (> (plist-get event :end) now))
+                        active-color note-color)))
+        (when (> x2 x1)
+          (svg-rectangle svg x1 y (max 2 (- x2 x1)) note-height :fill color))))
+    (let ((x (+ left (* plot-width (/ (- cycle-now cycle-begin) cycles)))))
+      (svg-line svg x top x (+ top plot-height)
+                :stroke-color active-color :stroke-width 2))
+    (svg-image svg :ascent 'center)))
+
+(defun rustel--visual-before-string (image leading-newline)
+  "Make a virtual buffer line containing IMAGE."
+  (concat (if leading-newline "\n" "")
+          (propertize " " 'display image 'rear-nonsticky '(display))
+          "\n"))
+
+(defun rustel--refresh-pianoroll-overlays (buffer process now)
+  "Refresh visible piano-roll overlays for BUFFER from PROCESS."
+  (let ((window (rustel--graphics-window buffer)))
+    (when (and window
+               (not (with-current-buffer buffer (buffer-modified-p)))
+               (with-current-buffer buffer
+                 (equal rustel--source-revision
+                        (process-get process 'rustel-revision)))
+               (process-live-p process))
+      (let* ((frame (window-frame window))
+             (width (max 360 (min 1100 (- (window-pixel-width window) 36)))))
+        (with-current-buffer buffer
+          (dolist (entry rustel--visual-overlays)
+            (let* ((overlay (car entry))
+                   (visual (cdr entry))
+                   (image (rustel--pianoroll-image process visual now width frame)))
+              (overlay-put overlay 'before-string
+                           (rustel--visual-before-string
+                            image (overlay-get overlay 'rustel-leading-newline))))))))))
 
 (defun rustel--handle-layout (process layout)
   "Accept a new installed-score LAYOUT from PROCESS."
@@ -138,17 +333,34 @@ the clock without opening an audio device."
         (rustel--refresh-source-snapshot)
         (process-put process 'rustel-generation generation)
         (process-put process 'rustel-revision revision)
+        (process-put process 'rustel-visuals (alist-get 'visuals layout))
         (process-put process 'rustel-events nil)
         (process-put process 'rustel-offset nil)
         (process-put process 'rustel-device-time nil)
         (rustel--clear-overlays)
+        (rustel--clear-visual-overlays)
+        (when (equal revision rustel--source-revision)
+          (rustel--install-visual-overlays process buffer))
         (unless (equal revision rustel--source-revision)
           (message "Rustel installed a different source revision; live highlighting is paused"))))))
+
+(defun rustel--rational-number (value)
+  "Convert Rustel's rational string VALUE to a floating-point number."
+  (cond
+   ((numberp value) (float value))
+   ((and (stringp value)
+         (string-match "\\`\\(-?[0-9]+\\)/\\([0-9]+\\)\\'" value)
+         (> (string-to-number (match-string 2 value)) 0))
+    (/ (float (string-to-number (match-string 1 value)))
+       (string-to-number (match-string 2 value))))
+   ((stringp value) (string-to-number value))
+   (t nil)))
 
 (defun rustel--event-entry (event offset revision)
   "Make an editor event from EVENT, clock OFFSET and source REVISION."
   (let ((target (alist-get 'target_time event))
         (duration (alist-get 'duration_seconds event))
+        (frequency (alist-get 'frequency_hz event))
         (context (alist-get 'context event)))
     (when (and (numberp target)
                (numberp duration)
@@ -157,7 +369,16 @@ the clock without opening an audio device."
       (list :start (+ target offset)
             :end (+ target offset duration)
             :revision revision
-            :context context))))
+            :context context
+            :cycle-begin (rustel--rational-number (alist-get 'whole_begin event))
+            :cycle-end (rustel--rational-number (alist-get 'whole_end event))
+            :pitch (and (numberp frequency)
+                        (> frequency 0)
+                        (+ 69.0 (* 12.0 (/ (log (/ frequency 440.0)) (log 2.0)))))
+            :visual-mask (or (alist-get 'ui_visuals event) 0)
+            :label (or (alist-get 'active_label event)
+                       (alist-get 'label event)
+                       (alist-get 'value event))))))
 
 (defun rustel--handle-events (process batch)
   "Accept scheduled onset BATCH records from PROCESS."
@@ -196,11 +417,13 @@ the clock without opening an audio device."
         (setq events
               (seq-take
                (seq-filter (lambda (entry)
-                             (> (plist-get entry :end) (- now 1.0)))
+                             (> (plist-get entry :end) (- now 8.0)))
                            events)
                1024))
         (process-put process 'rustel-events events)
         (process-put process 'rustel-offset offset)
+        (process-put process 'rustel-cycle (alist-get 'cycle batch))
+        (process-put process 'rustel-cps (alist-get 'cps batch))
         (process-put process 'rustel-device-time device-time)))))
 
 (defun rustel--handle-record (process record)
@@ -263,6 +486,8 @@ the clock without opening an audio device."
       (rustel--clear-overlays)
       (let ((process rustel--process)
             (now (float-time)))
+        (when (process-live-p process)
+          (rustel--refresh-pianoroll-overlays buffer process now))
         (when (and (process-live-p process)
                    (not (buffer-modified-p))
                    rustel--source-revision
@@ -306,7 +531,8 @@ the clock without opening an audio device."
           (when (eq rustel--process process)
             (setq rustel--process nil)
             (rustel--stop-timer buffer)
-            (rustel--clear-overlays))))
+            (rustel--clear-overlays)
+            (rustel--clear-visual-overlays))))
       (when-let ((stderr (process-get process 'rustel-stderr-process)))
         (when (process-live-p stderr) (delete-process stderr)))
       (when (and bad-exit (not expected) (buffer-live-p stderr-buffer))
@@ -319,7 +545,8 @@ the clock without opening an audio device."
     (process-put rustel--process 'rustel-expected-stop t)
     (interrupt-process rustel--process))
   (rustel--stop-timer (current-buffer))
-  (rustel--clear-overlays))
+  (rustel--clear-overlays)
+  (rustel--clear-visual-overlays))
 
 ;;;###autoload
 (defun rustel-play ()
@@ -374,7 +601,8 @@ the clock without opening an audio device."
       (process-put stderr 'rustel-parent process)
       (setq rustel--process process
             rustel--active-process process
-            rustel--timer (run-at-time 0 0.033 #'rustel--refresh-overlays buffer))
+            rustel--timer (run-at-time 0 (/ 1.0 rustel-visual-refresh-rate)
+                                        #'rustel--refresh-overlays buffer))
       (message "Rustel started: %s" (file-name-nondirectory buffer-file-name))))))
 
 ;;;###autoload
@@ -393,7 +621,7 @@ the clock without opening an audio device."
 
 ;;;###autoload
 (define-derived-mode rustel-mode js-mode "Rustel"
-  "Major mode for Rustel/Strudel scores with basic live playback.
+  "Major mode for Rustel/Strudel scores with live playback and piano rolls.
 
 \{rustel-mode-map}"
   (rustel--select-utf8-coding)
