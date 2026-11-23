@@ -122,9 +122,13 @@ La prueba real con Rustel 0.1.6 y salida silenciosa recibió generación 1, even
 Diagnóstico del pequeño lag
 ---------------------------
 
-Se instrumentó una ejecución silenciosa de dos segundos con el score `~/scope.strudel` y el Emacs gráfico 30.2. La construcción SVG de la pianoroll promedió ~2.3 ms por actualización. La del scope (512 muestras conectadas con segmentos SVG) promedió ~13.8 ms, con una llamada máxima de ~97 ms; se observaron dos GC durante esas llamadas. El callback completo llegó a ~98 ms en su máximo. Estas medidas cubren Elisp/construcción de imagen, no el tiempo total de rasterización/redisplay ni la salida física de audio.
+Primero se instrumentó una ejecución silenciosa de dos segundos con `~/scope.strudel` y ambos visuales en Emacs gráfico 30.2: la construcción SVG de la pianoroll promedió ~2.3 ms, y la del scope (512 muestras conectadas con segmentos SVG) ~13.8 ms, con una llamada máxima cercana a 97 ms y GC durante esas llamadas. Eso identifica al scope como carga adicional cuando está habilitado, pero no explica un lag que también ocurre sin scope.
 
-Esto apunta a trabajo síncrono del scope y pausas de GC en el mismo event loop como causa probable de los pequeños tirones, no a una rama especial para la última nota. El scope además recibe frames como máximo a ~30 Hz y el sink puede coalescer frames. La pianoroll mantiene su playhead a partir del reloj del dispositivo; el final lógico de la nota usa `duration_seconds`, que no incluye necesariamente toda la cola del sonido. Para separar retraso visual de cola acústica haría falta comparar una reproducción con scope desactivado y una con scope, además de medir el dispositivo real.
+Se hizo luego una prueba A/B de dos segundos con solo `._pianoroll()`: construir su SVG promedió ~0.9 ms (máximo ~1.4 ms, sin GC). Las llamadas de render ocurrieron en promedio cada ~16.7 ms, con huecos ocasionales de ~35–37 ms. La entrega de eventos, una vez pasado el arranque, tuvo residuos de llegada de ~0.05–3.6 ms respecto al offset mínimo observado; el primer lote de arranque sí llegó ~100 ms tarde. Estos son tests silenciosos y miden la parte Elisp/descriptor SVG, no toda la rasterización, redisplay ni el tiempo físico de salida de audio.
+
+Conclusión corregida: no hay una rama especial para la última nota y la construcción SVG normal de la pianoroll es demasiado rápida para ser el cuello de botella. Si el síntoma ocurre también sin scope, las posibilidades más probables son jitter de timer/redisplay (un tick nominal de 16.7 ms puede saltarse ocasionalmente) o una diferencia fija entre el reloj de eventos y el audio audible del dispositivo. El scope sí puede agravar los tirones cuando está activo. Para distinguirlas, hay que saber si el playhead/iluminación va detrás del sonido, si el gráfico se congela un frame, o si el audio sigue en su cola después de acabar la nota lógica; un scope apagado es un A/B útil.
+
+La versión tampoco es una corrección garantizada: el índice oficial de GNU consultado lista Emacs 31.1 como último release y no lista una versión 32. El benchmark citado usó Emacs 31.0.50; sus resultados no prueban que una futura 32 elimine la variación de timers/redisplay. Una actualización puede mejorar el backend gráfico, pero habría que repetir el benchmark del modo en esa versión.
 
 Aún no implementado: Flymake/`rustel check`, `spectrum`, `punchcard`, `wordfall`, `spiral`, `pitchwheel`, controles `ui_control` para sliders, paneles de Studio y completado de referencia.
 
@@ -194,6 +198,7 @@ Rustel v0.1.6:
 - Manual Emacs Lisp, mostrar imágenes: https://www.gnu.org/software/emacs/manual/html_node/elisp/Showing-Images.html
 - Manual Emacs Lisp, imágenes SVG: https://www.gnu.org/software/emacs/manual/html_node/elisp/SVG-Images.html
 - Manual Emacs Lisp, timers: https://www.gnu.org/software/emacs/manual/html_node/elisp/Timers.html
+- Releases oficiales de GNU Emacs: https://ftp.gnu.org/gnu/emacs/
 - Artículo Chiply, Emacs SVG Benchmark: https://www.chiply.dev/post-emacs-svg-benchmark
 - Harness reproducible del benchmark: https://github.com/chiply/.zetta.d/blob/main/svg-bench/svg-bench.el
 - Manual Emacs Lisp, módulos dinámicos: https://www.gnu.org/software/emacs/manual/html_node/elisp/Dynamic-Modules.html
