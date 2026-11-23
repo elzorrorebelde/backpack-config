@@ -1,3 +1,7 @@
+(leaf rustel-mode
+  :load-path backpack-user-dir
+  :mode ("\\.\\(?:strudel\\|rustel\\)\\'" . rustel-mode))
+
 (leaf playerctl
   :ensure t
   :doctor ("playerctl" . ("Command-line utility and library for controlling media players that implement MPRIS" 'required))

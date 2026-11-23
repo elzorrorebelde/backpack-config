@@ -1,0 +1,179 @@
+INVESTIGACIÓN: RUSTEL STUDIO, INTEGRACIÓN CON EDITORES EXTERNOS Y VIABILIDAD PARA EMACS
+
+Alcance
+-------
+Se revisó Rustel upstream v0.1.6 (commit 96b2c83dec12429334744b1e540ae7dcdc6f61c5) y el plugin rustel-neovim (checkout revisado en commit 99e5910d9bb8583cd1f226237504677a8d195683). La pregunta de implementación se interpreta como crear un major mode de Emacs para archivos Strudel/Rustel.
+
+Conclusión ejecutiva
+--------------------
+Rustel sí ofrece una vía concreta para comunicar retroalimentación de reproducción a editores externos. La CLI tiene un protocolo de eventos de interfaz en vivo, NDJSON, activado con --ui-events. La opción está oculta en la ayuda, pero el código lo define como un protocolo versionado y destinado a clientes de editor/terminal. El plugin rustel-neovim ya consume ese flujo y demuestra edición, reproducción, resaltado de notas y visuales dentro del buffer.
+
+Por tanto, un cliente de Emacs con retroalimentación en vivo es viable sin enlazar directamente el motor Rust. La recomendación es usar un proceso rustel y adaptar el protocolo a procesos, filtros JSON y overlays/visuales de Emacs. Esto no equivale a portar todas las funciones de rustel studio.
+
+1. Superficies que Rustel expone
+--------------------------------
+
+A. CLI — integración externa práctica
+
+- rustel check - --json acepta el score por stdin y devuelve diagnósticos en JSON, incluidos offsets de origen.
+- rustel play ARCHIVO --watch mantiene la reproducción y recarga al guardar cambios.
+- rustel query --json permite consultar eventos; rustel export/render produce audio; rustel doc ofrece documentación.
+- --score-events emite avisos score_active con el score instalado, útil para saber qué código quedó activo, pero no ofrece la información detallada de cada nota.
+
+B. Protocolo de retroalimentación en vivo
+
+La opción:
+
+    rustel play ARCHIVO.strudel --watch --ui-events
+
+activa un canal NDJSON bidireccional:
+
+- stdin: controles del cliente.
+- stdout: solo registros del protocolo UI.
+- stderr: mensajes/diagnósticos de Rustel, estructurados como JSON en este modo.
+
+No se deben combinar stdout y stderr al parsear el protocolo. Para Emacs se debería iniciar el proceso con los tres streams separados y procesar stdout incrementalmente, acumulando bytes hasta completar cada línea JSON.
+
+Registros principales del protocolo:
+
+- ui_layout: instantánea del score instalado. Incluye versión del esquema, generación, SHA-256 del texto, rangos mini_locations, visuales declarados y sliders literales. Los rangos son offsets en bytes UTF-8.
+- ui_events: lotes de eventos programados que alcanzaron una ruta de salida. Incluyen device_time, ciclo/cps, generación, hash de fuente y eventos con tiempos de destino/duración, rangos context, etiquetas/color y, cuando corresponde, frecuencia y ganancia. Los ciclos conservan valores racionales como texto. Sirve para resaltar las expresiones que producen las notas.
+- ui_audio: muestras analizadas de scope y espectro; puede incluir datos asociados a visuales individuales. La CLI activa esta salida cuando el layout del score solicita visualizadores compatibles (scope, tscope o spectrum); no es un stream general de PCM. El muestreo se limita aproximadamente a 30 Hz y se pueden reemplazar/perder frames intermedios.
+- live_error y otros avisos de ejecución se reciben por stderr, no dentro del flujo stdout puro.
+
+Los eventos están ligados a generation y source_revision (SHA-256 del score exacto). El cliente debe ignorar eventos de generaciones antiguas o cuyo hash no corresponda al texto representado. Los rangos source/context son bytes UTF-8 y requieren conversión a posiciones de caracteres de Emacs. Para dibujar el resaltado a tiempo, se deben usar target_time y duration_seconds junto con el reloj del dispositivo; no resaltar simplemente al recibir el registro, pues la nota puede estar programada para un instante posterior.
+
+El protocolo es acotado para no frenar el audio. Los lotes de eventos tienen límites y exponen dropped cuando hubo pérdidas; el stream de audio reemplaza frames anteriores si el cliente no los consume a tiempo. El cliente debe tolerar pérdidas y evitar bloquear el proceso de audio.
+
+C. Controles desde el editor
+
+El lector de stdin de --ui-events acepta actualmente controles de sliders, por ejemplo:
+
+    {"ui_control":{"version":1,"kind":"slider","generation":17,"source_revision":"<sha256-del-layout>","id":"<id-del-slider>","value":0.7}}
+
+Rustel valida la versión, generación, hash, ID y rango del slider. Es un canal de control limitado, no una API general para mandar stop/play, operar el mixer o cambiar escenas. Solo sliders literales representables en el layout se ofrecen; expresiones JavaScript dinámicas no siempre pueden convertirse en controles UI.
+
+2. Qué reutiliza rustel-neovim
+------------------------------
+
+El repositorio tzfm/rustel-neovim es un cliente funcional del protocolo, no solo un archivo de sintaxis:
+
+- Inicia `rustel play <archivo> --watch --ui-events`.
+- Guarda/actualiza el archivo y administra el ciclo de vida del proceso.
+- Lee los registros JSON de stdout y los errores de stderr.
+- Convierte context en resaltados activos (extmarks) únicamente cuando el buffer coincide con la revisión reproducida.
+- Renderiza visuales como piano roll, punchcard, wordfall, espiral, pitchwheel, scope, tscope y spectrum con líneas virtuales en el buffer.
+- Mantiene el reloj/ciclo entre frames, muestra errores y deja la última reproducción válida cuando un reload falla.
+- Solo reproduce un archivo a la vez. Las opciones de visualización se interpretan de forma acotada: soporta opciones literales comunes, no evalúa expresiones JavaScript, callbacks ni CSS.
+
+El cliente no consume todas las funciones de Studio. En particular, no implementa sets/escenas, mixer completo ni el resto de los paneles. Aunque Rustel acepta controles ui_control para sliders, el plugin Neovim revisado no parece enviar esos controles al proceso.
+
+Archivos relevantes del plugin:
+- lua/rustel/init.lua: proceso, comandos y ciclo de vida.
+- lua/rustel/protocol.lua: parser incremental y validación básica.
+- lua/rustel/state.lua: revisiones, generaciones, eventos y reloj.
+- lua/rustel/highlights.lua: overlays de notas activas.
+- lua/rustel/view.lua y lua/rustel/render/: visuales inline.
+- README.md: teclas, comandos, vistas y límites.
+
+3. Viabilidad y límites de reutilización
+----------------------------------------
+
+- rustel-studio expone APIs Rust como run(StudioOptions), StudioEngine y StudioWorker, además de módulos editor/syntax/lint/reference. Sin embargo, run abre su propia interfaz de terminal; la superficie está diseñada para un host Rust, no para una interfaz Lisp.
+- Los crates de Rustel no se publican en crates.io (por ejemplo rustel-studio y rustel-engine declaran publish = false). Se pueden estudiar o consumir desde el checkout Git/workspace, pero no se encontró un ABI C estable para llamar desde Emacs Lisp.
+- rustel-engine está orientado a embedding Rust del motor, sesión, audio y renderizado. No aporta por sí solo toda la UI de Studio.
+- --ui-events es una opción CLI oculta y la documentación de usuario no describe en detalle este protocolo. Aunque los esquemas tienen versiones en el código, una integración externa debería fijar una versión de Rustel, validar campos/versiones y tolerar cambios.
+- Tanto Rustel como rustel-neovim declaran AGPL-3.0-or-later. Conviene revisar la licencia antes de copiar o adaptar literalmente código del plugin.
+
+4. Propuesta de alcance para un major mode de Emacs
+---------------------------------------------------
+
+Primera etapa (alcance útil y razonable):
+1. Major mode para .strudel/.rustel: sintaxis, comentarios, indentación y comandos básicos.
+2. Validación del buffer con `rustel check - --json`, integrada con Flymake; traducir correctamente offsets UTF-8.
+3. Comandos start/update/stop y export/query apoyados en la CLI.
+4. Iniciar `rustel play ARCHIVO --watch --ui-events` con stdin/stdout/stderr separados.
+5. Parsear ui_layout/ui_events, comparar source_revision con el texto correspondiente y dibujar overlays temporales para las notas activas usando el tiempo de dispositivo.
+
+Segunda etapa:
+- Renderizar visuales compatibles en ventanas/overlays de Emacs a partir de ui_audio y de los datos de eventos.
+- Enviar ui_control para los sliders literales.
+- Mejorar manejo de errores, generaciones, pérdidas de eventos, latencia de audio y edición/guardado concurrente.
+
+La paridad completa con Studio requeriría además reimplementar dentro de Emacs numerosos paneles y flujos que el protocolo no expone. No es necesario para conseguir la parte de mayor valor para live coding: edición, hot reload, feedback de notas y visuales en vivo.
+
+Estado del prototipo implementado
+---------------------------------
+
+Se creó `rustel-mode.el` en la configuración de Emacs y se integró desde `packages.el` usando Leaf:
+
+    (leaf rustel-mode
+      :load-path backpack-user-dir
+      :mode ("\\.\\(?:strudel\\|rustel\\)\\'" . rustel-mode))
+
+El modo deriva de `js-mode`, se activa para `.strudel` y `.rustel`, y ofrece:
+- `C-c C-c`: guardar el archivo e iniciar Rustel, o guardar cambios mientras Rustel observa el archivo.
+- `C-c C-k`: enviar stop; repetir durante la cola para cortar.
+- Cliente básico de `--ui-events`: lee stdout NDJSON, comprueba generación/revisión, traduce rangos UTF-8 y dibuja overlays sobre las expresiones de notas activas. Los errores estructurados de stderr se muestran como warnings.
+
+La prueba real con Rustel 0.1.6, salida silenciosa y un score de ejemplo recibió el layout de generación 1 y eventos en vivo; Emacs creó dos overlays activos. También pasaron la compilación byte-code, la asociación de archivo mediante Leaf y la prueba de conversión de offsets UTF-8.
+
+Aún no implementado: Flymake/`rustel check`, visuales basados en `ui_audio`, controles `ui_control` para sliders, paneles de Studio y completado de referencia.
+
+Buffers sin archivo asociado
+----------------------------
+
+El prototipo requiere que `buffer-file-name` exista. Si se ejecuta `C-c C-c` en un buffer scratch sin archivo, informa `Open a saved Rustel score buffer first` y no inicia Rustel. Si el buffer ya visita un archivo, `C-c C-c` guarda los cambios antes de reproducir.
+
+La reproducción de un buffer sin guardarlo a una ruta permanente todavía no está implementada. La opción considerada es crear un `.strudel` temporal por buffer, escribir allí el contenido para que `rustel play --watch` lo observe y borrar el temporal al detener o cerrar la reproducción.
+
+5. Plausibilidad de visualizar visuales inline en Emacs
+------------------------------------------------------
+
+Conclusión: es técnicamente muy plausible reproducir en Emacs visuales como `._pianoroll()`. La dificultad principal no es acceder a los datos, sino implementar y medir un renderer de Emacs que actualice sin estorbar la edición. No hace falta cambiar Rustel para la primera versión.
+
+Datos disponibles en Rustel:
+- `ui_layout.visuals` informa cada visual con `kind`, `inline`, `slot`, rangos de origen y opciones textuales. Incluye `pianoroll`, `punchcard`, `wordfall`, `spiral`, `pitchwheel`, `scope`, `tscope`, `spectrum` y `markcss`.
+- `ui_events` entrega eventos con tiempo objetivo/duración, pitch/frecuencia, contexto de origen y slots visuales. Los eventos son suficientes para construir un piano roll y avanzar el playhead interpolando con el reloj/ciclo.
+- `ui_audio` aporta arrays de 512 muestras de scope y 512 bins de espectro. Rustel solo envía estos frames cuando el score solicita visuales compatibles, y el productor limita la cadencia a unos 30 Hz (cada 33.334 ms).
+
+El plugin de Neovim ofrece un modelo de implementación: dibuja una pequeña canvas de texto con braille/Unicode y genera líneas virtuales de seis filas debajo de cada llamada visual. Su timer actualiza a 33 ms, unos 30 FPS. Los algoritmos de piano roll, espiral, pitchwheel, scope y espectro están en `lua/rustel/render/`; el protocolo, el anclaje al score y la gestión temporal están en `lua/rustel/state.lua` y `lua/rustel/view.lua`.
+
+Emacs tiene opciones gráficas adecuadas para otro renderer:
+- El manual de Emacs Lisp documenta imágenes en propiedades `display` y las funciones `put-image` / `insert-image`; `put-image` crea un overlay, por lo que es posible insertar un gráfico debajo de la llamada sin alterar el texto del score.
+- `svg-create`, `svg-line`, `svg-rectangle` y `svg-image` permiten componer SVG desde Lisp y mostrarlo como imagen. También puede usarse un renderer de texto Braille como fallback para terminales sin imágenes.
+- En el Emacs 30.2 instalado, `image-type-available-p` devuelve verdadero para SVG y PNG. `display-images-p` es nil en la ejecución batch (sin frame gráfico); hay que consultarlo en el frame gráfico donde se usará el modo.
+
+Sobre 60 FPS, el artículo de Chiply aporta evidencia más directa que la estimación inicial: en un frame gráfico real midió `insert-image` con SVG nuevo por frame y `redisplay t`. El benchmark reporta, para una barra SVG de 30 px de alto, ~290 FPS a 800 px, ~134 a 1800 px y ~77 a 3000 px (peor ensayo: 71 FPS). Una animación SVG delgada de 56 px obtuvo ~517/248/134 FPS a 300/700/1400 px, con mínimo de 129 FPS. El SVG sí es más caro que el texto nativo (en sus pruebas, ~20–50x), pero su rasterización dejó mucho margen sobre 60 FPS a esos tamaños.
+
+Los resultados se midieron en Emacs 31.0.50 nativo-compilado sobre un Mac M5, con frame GUI y librsvg; el harness calentó y limpió el cache, hizo variar un marcador por frame para forzar misses reales, elevó `gc-cons-threshold` y forzó redisplay. Es evidencia fuerte de que SVG inline a 60 FPS es plausible, no una garantía para cualquier PC o renderer. Un piano roll de Rustel tiene formas/eventos dinámicos y trabajo de proceso/Elisp que no están cubiertos exactamente por la barra sintética. Además, los timers de Emacs pueden retrasarse si Emacs está ocupado: el benchmark mide tiempo de render/redisplay forzado, no una garantía de scheduler a 60 Hz.
+
+Conclusión refinada: plantear 60 FPS como objetivo inicial para un panel SVG moderado es razonable, en vez de asumir que debe limitarse a 30 FPS. Conviene mantener un fallback configurable a 30 FPS y medir el pipeline completo en la máquina real. El piano roll puede interpolar playhead/notas a 60 Hz usando los tiempos de `ui_events`; los nuevos datos de audio de scope/spectrum siguen llegando a como máximo ~30 Hz, así que esas vistas repetirían o interpolarían el último frame.
+
+MVP recomendado:
+1. Implementar primero `._pianoroll()` usando `ui_layout.visuals` para anclar un SVG/imagen overlay debajo de la llamada y `ui_events` para dibujar notas y playhead.
+2. Probar render a 60 FPS en un panel acotado; evitar recomponer datos estáticos, limitar allocations por frame y no redibujar buffers/visuales que no están visibles. Bajar a 30 FPS si el benchmark de Rustel real lo requiere.
+3. Añadir scope/spectrum más tarde a partir de `ui_audio`; mantener el último frame si no llega uno nuevo.
+4. Usar `display-images-p` e `image-type-available-p` para escoger SVG o fallback de texto. Mantener el filtro del proceso y la ruta de audio no bloqueantes.
+
+El prototipo actual de Emacs solo consume `ui_layout` para generación/revisión y `ui_events` para overlays de notas activas: todavía ignora la lista de visuales y `ui_audio`. Por ello, la nueva funcionalidad sería una extensión clara del cliente existente. La viabilidad es alta para un piano roll básico; 60 FPS son plausibles según el benchmark de SVG, aunque faltaría medir el renderer real de Rustel y su event loop en esta configuración.
+
+6. Referencias
+--------------
+
+Rustel v0.1.6:
+- docs/studio.md: https://github.com/tzfm/rustel/blob/v0.1.6/docs/studio.md
+- docs/cli.md: https://github.com/tzfm/rustel/blob/v0.1.6/docs/cli.md
+- docs/sessions.md: https://github.com/tzfm/rustel/blob/v0.1.6/docs/sessions.md
+- docs/embedding.md: https://github.com/tzfm/rustel/blob/v0.1.6/docs/embedding.md
+- crates/runtime/src/ui_events.rs: https://github.com/tzfm/rustel/blob/v0.1.6/crates/runtime/src/ui_events.rs
+- crates/cli/src/main.rs: https://github.com/tzfm/rustel/blob/v0.1.6/crates/cli/src/main.rs
+- crates/cli/src/live.rs: https://github.com/tzfm/rustel/blob/v0.1.6/crates/cli/src/live.rs
+- README del cliente Neovim: https://github.com/tzfm/rustel-neovim/blob/main/README.md
+- Renderer Neovim de eventos: https://github.com/tzfm/rustel-neovim/blob/main/lua/rustel/render/events.lua
+- Renderer Neovim de audio: https://github.com/tzfm/rustel-neovim/blob/main/lua/rustel/render/audio.lua
+- Manual Emacs Lisp, mostrar imágenes: https://www.gnu.org/software/emacs/manual/html_node/elisp/Showing-Images.html
+- Manual Emacs Lisp, imágenes SVG: https://www.gnu.org/software/emacs/manual/html_node/elisp/SVG-Images.html
+- Manual Emacs Lisp, timers: https://www.gnu.org/software/emacs/manual/html_node/elisp/Timers.html
+- Artículo Chiply, Emacs SVG Benchmark: https://www.chiply.dev/post-emacs-svg-benchmark
+- Harness reproducible del benchmark: https://github.com/chiply/.zetta.d/blob/main/svg-bench/svg-bench.el
