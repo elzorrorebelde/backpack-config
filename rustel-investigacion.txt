@@ -115,11 +115,11 @@ El modo deriva de `js-mode`, se activa para `.strudel` y `.rustel`, y ofrece:
 - `C-c C-c`: guardar el archivo e iniciar Rustel, o guardar cambios mientras Rustel observa el archivo.
 - `C-c C-k`: enviar stop; repetir durante la cola para cortar.
 - Cliente de `--ui-events`: lee stdout NDJSON, comprueba generación/revisión, traduce rangos UTF-8 y dibuja overlays sobre las expresiones de notas activas. Los errores estructurados de stderr se muestran como warnings.
-- Primera visual SVG: lee `ui_layout.visuals` y dibuja `pianoroll` como imagen inline debajo de `._pianoroll()`. Usa la ranura visual para filtrar eventos, las fracciones de ciclo y pitch/frecuencia para dibujar notas, y un playhead interpolado. El objetivo de actualización predeterminado es 60 Hz (`rustel-visual-refresh-rate`), configurable a 30 o 60; altura se configura con `rustel-pianoroll-height`.
+- Visuales SVG: lee `ui_layout.visuals` y dibuja `pianoroll` como imagen inline debajo de `._pianoroll()`. Usa la ranura visual para filtrar eventos, las fracciones de ciclo y pitch/frecuencia para dibujar notas, y un playhead interpolado. También dibuja `scope`/`tscope` debajo de `._scope()` a partir de la entrada `ui_audio` de su slot, con ajuste automático de amplitud y alineación de onda. El objetivo de actualización predeterminado es 60 Hz (`rustel-visual-refresh-rate`), configurable a 30 o 60; scope solo rasteriza al recibir un `ui_audio` nuevo (unos 30 Hz). La altura se configura con `rustel-pianoroll-height`.
 
-La prueba real con Rustel 0.1.6, salida silenciosa y un score de ejemplo recibió generación 1, eventos en vivo y dos overlays de código. En el Emacs 30.2 gráfico se recibió un layout con un `pianoroll`, se creó el overlay visual y su descriptor de imagen fue SVG. También pasaron compilación byte-code y las pruebas anteriores de Leaf/offsets.
+La prueba real con Rustel 0.1.6 y salida silenciosa recibió generación 1, eventos y frames de audio. En el Emacs 30.2 gráfico, una prueba con `._pianoroll()` y `._scope()` creó dos overlays SVG; el scope recibió su slot con 512 muestras y la secuencia de audio llegó a 29. También pasaron compilación byte-code y las pruebas anteriores de Leaf/offsets.
 
-Aún no implementado: Flymake/`rustel check`, visuales `scope`/`spectrum` basados en `ui_audio`, `punchcard`, `wordfall`, `spiral`, `pitchwheel`, controles `ui_control` para sliders, paneles de Studio y completado de referencia.
+Aún no implementado: Flymake/`rustel check`, `spectrum`, `punchcard`, `wordfall`, `spiral`, `pitchwheel`, controles `ui_control` para sliders, paneles de Studio y completado de referencia.
 
 Buffers sin archivo asociado
 ----------------------------
@@ -154,10 +154,10 @@ Conclusión refinada: plantear 60 FPS como objetivo inicial para un panel SVG mo
 Siguientes pasos recomendados:
 1. Medir el renderer `pianoroll` integrado con reproducción en el frame gráfico objetivo, incluyendo consumo de eventos y carga de edición; mantener el límite de FPS configurable y evitar dibujar buffers no visibles.
 2. Comparar la imagen SVG con un renderer de texto Braille/Unicode, especialmente para Emacs en terminal.
-3. Añadir `scope`/`spectrum` a partir de `ui_audio`; su entrada llega a unos 30 Hz, así que se debe retener el último frame entre muestras.
-4. Portar `punchcard`, `wordfall`, `spiral` y `pitchwheel` si el benchmark del primer visual es satisfactorio.
+3. Añadir `spectrum` a partir de `ui_audio`; conservar el último frame entre actualizaciones de unos 30 Hz.
+4. Portar `punchcard`, `wordfall`, `spiral` y `pitchwheel` si el benchmark de los dos primeros visuales es satisfactorio.
 
-El prototipo ahora consume `ui_layout.visuals` para renderizar `pianoroll` y `ui_events` para notas/playhead; aún ignora `ui_audio`. El benchmark de Chiply hace razonable apuntar a 60 FPS para un panel SVG acotado, pero falta medir FPS sostenido del renderer Rustel completo en el equipo y frame del usuario.
+El prototipo ahora consume `ui_layout.visuals` para `pianoroll` y `scope`/`tscope`, `ui_events` para notas/playhead y `ui_audio` para las muestras de scope. El benchmark de Chiply hace razonable apuntar a 60 FPS para el playhead y a la cadencia de 30 Hz para scope; todavía falta medir FPS sostenido del renderer Rustel completo bajo edición y en otras máquinas.
 
 6. Referencias
 --------------

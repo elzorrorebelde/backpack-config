@@ -6,7 +6,8 @@
 ;;; Commentary:
 ;; A small JavaScript-derived major mode for Rustel scores.  It starts
 ;; `rustel play FILE --watch --ui-events', highlights sounding source ranges,
-;; and draws inline SVG piano rolls for `._pianoroll()'.  Rustel must be on
+;; and draws inline SVG piano rolls/scopes for `._pianoroll()' and `._scope()'.
+;; Rustel must be on
 ;; `exec-path'.
 ;;
 ;; This is a first experiment, not a complete client for rustel-studio or a
@@ -166,13 +167,14 @@ Emacs timers can be delayed while Emacs is busy, so this is a target."
   "Create image anchors for supported visuals in PROCESS's current layout."
   (with-current-buffer buffer
     (dolist (visual (process-get process 'rustel-visuals))
-      (when (equal (alist-get 'kind visual) "pianoroll")
+      (when (member (alist-get 'kind visual) '("pianoroll" "scope" "tscope"))
         (let* ((end (rustel--byte-to-position (alist-get 'to visual)))
                (anchor (and end (rustel--visual-anchor end))))
           (when anchor
             (let ((overlay (make-overlay (car anchor) (car anchor) nil t t)))
               (overlay-put overlay 'priority 80)
               (overlay-put overlay 'rustel-leading-newline (cdr anchor))
+              (overlay-put overlay 'rustel-audio-sequence :unrendered)
               (push (cons overlay visual) rustel--visual-overlays))))))))
 
 (defun rustel--graphics-window (buffer)
@@ -295,14 +297,99 @@ Emacs timers can be delayed while Emacs is busy, so this is a target."
                 :stroke-color active-color :stroke-width 2))
     (svg-image svg :ascent 'center)))
 
+(defun rustel--audio-frame-for-visual (process visual)
+  "Select the latest audio frame for PROCESS's VISUAL slot."
+  (let* ((audio (process-get process 'rustel-audio))
+         (slot (alist-get 'slot visual)))
+    (when audio
+      (if (null slot)
+          audio
+        (seq-find (lambda (item) (equal (alist-get 'slot item) slot))
+                  (alist-get 'visuals audio))))))
+
+(defun rustel--literal-number-option (visual key default)
+  "Read numeric literal KEY from VISUAL's options, or return DEFAULT."
+  (let ((options (alist-get 'options visual)))
+    (if (and (stringp options)
+             (string-match
+              (format "\\_<%s\\_>[ \t\n]*:[ \t\n]*\\([-+]?[0-9]+\\(?:\\.[0-9]+\\)?\\)"
+                      (regexp-quote key))
+              options))
+        (string-to-number (match-string 1 options))
+      default)))
+
+(defun rustel--scope-image (process visual width frame)
+  "Build a waveform SVG for VISUAL from PROCESS's latest UI audio frame."
+  (let* ((audio (rustel--audio-frame-for-visual process visual))
+         (samples (and audio (alist-get 'scope audio)))
+         (height (max 80 rustel-pianoroll-height))
+         (left 8) (right 8) (top 24) (bottom 12)
+         (plot-width (- width left right))
+         (plot-height (- height top bottom))
+         (center (+ top (/ plot-height 2.0)))
+         (background (rustel--svg-face-color 'default :background frame "#17191f"))
+         (foreground (rustel--svg-face-color 'default :foreground frame "#e0e0e0"))
+         (grid (rustel--svg-face-color 'shadow :foreground frame "#454955"))
+         (wave (rustel--svg-face-color 'font-lock-function-name-face
+                                       :foreground frame "#72b7ff"))
+         (svg (svg-create width height)))
+    (svg-rectangle svg 0 0 width height :fill background)
+    (svg-text svg (if (equal (alist-get 'kind visual) "tscope")
+                      "Rustel · tscope" "Rustel · scope")
+              :x left :y 16 :font-size 11 :font-family "sans-serif" :fill foreground)
+    (svg-line svg left center (- width right) center
+              :stroke-color grid :stroke-width 1)
+    (if (and (listp samples) (> (length samples) 1))
+        (let* ((count (length samples))
+               (trigger (max -1.0 (min 1.0
+                                       (rustel--literal-number-option visual "trigger" 0.0))))
+               (align (not (string-match-p "\\_<align\\_>[ \t\n]*:[ \t\n]*false"
+                                           (or (alist-get 'options visual) ""))))
+               (start 0)
+               (limit (floor count 2))
+               (index 1))
+          (when align
+            (while (and (< index limit)
+                        (not (and (> (nth (1- index) samples) (- trigger))
+                                  (<= (nth index samples) (- trigger)))))
+              (setq index (1+ index)))
+            (when (< index limit) (setq start index)))
+          (let ((peak 0.0)
+                (scale-option (rustel--literal-number-option visual "scale" nil))
+                (cursor start)
+                previous)
+            (while (< cursor count)
+              (setq peak (max peak (abs (nth cursor samples))))
+              (setq cursor (1+ cursor)))
+            (let ((scale (if scale-option
+                             (max 0.01 (min 8.0 scale-option))
+                           (if (> peak 0.002) (min 12.0 (/ 0.92 peak)) 1.0))))
+              (setq cursor start)
+              (while (< cursor count)
+                (let* ((x (+ left (* plot-width
+                                     (/ (float (- cursor start))
+                                        (max 1 (- count start 1))))))
+                       (sample (max -1.0 (min 1.0 (* (nth cursor samples) scale))))
+                       (y (max top (min (+ top plot-height)
+                                        (- center (* sample (/ plot-height 2.0))))))
+                       (point (cons x y)))
+                  (when previous
+                    (svg-line svg (car previous) (cdr previous) x y
+                              :stroke-color wave :stroke-width 1.5))
+                  (setq previous point)
+                  (setq cursor (1+ cursor)))))))
+      (svg-text svg "Waiting for audio" :x left :y (+ center 4)
+                :font-size 10 :font-family "sans-serif" :fill foreground))
+    (svg-image svg :ascent 'center)))
+
 (defun rustel--visual-before-string (image leading-newline)
   "Make a virtual buffer line containing IMAGE."
   (concat (if leading-newline "\n" "")
           (propertize " " 'display image 'rear-nonsticky '(display))
           "\n"))
 
-(defun rustel--refresh-pianoroll-overlays (buffer process now)
-  "Refresh visible piano-roll overlays for BUFFER from PROCESS."
+(defun rustel--refresh-visual-overlays (buffer process now)
+  "Refresh visible SVG overlays for BUFFER from PROCESS."
   (let ((window (rustel--graphics-window buffer)))
     (when (and window
                (not (with-current-buffer buffer (buffer-modified-p)))
@@ -316,10 +403,25 @@ Emacs timers can be delayed while Emacs is busy, so this is a target."
           (dolist (entry rustel--visual-overlays)
             (let* ((overlay (car entry))
                    (visual (cdr entry))
-                   (image (rustel--pianoroll-image process visual now width frame)))
-              (overlay-put overlay 'before-string
-                           (rustel--visual-before-string
-                            image (overlay-get overlay 'rustel-leading-newline))))))))))
+                   (kind (alist-get 'kind visual))
+                   (audio-frame (and (member kind '("scope" "tscope"))
+                                     (rustel--audio-frame-for-visual process visual)))
+                   (audio-sequence (and audio-frame
+                                        (alist-get 'sequence
+                                                   (process-get process 'rustel-audio))))
+                   (image
+                    (cond
+                     ((equal kind "pianoroll")
+                      (rustel--pianoroll-image process visual now width frame))
+                     ((and (member kind '("scope" "tscope"))
+                           (not (equal audio-sequence
+                                       (overlay-get overlay 'rustel-audio-sequence))))
+                      (overlay-put overlay 'rustel-audio-sequence audio-sequence)
+                      (rustel--scope-image process visual width frame)))))
+              (when image
+                (overlay-put overlay 'before-string
+                             (rustel--visual-before-string
+                              image (overlay-get overlay 'rustel-leading-newline)))))))))))
 
 (defun rustel--handle-layout (process layout)
   "Accept a new installed-score LAYOUT from PROCESS."
@@ -334,6 +436,7 @@ Emacs timers can be delayed while Emacs is busy, so this is a target."
         (process-put process 'rustel-generation generation)
         (process-put process 'rustel-revision revision)
         (process-put process 'rustel-visuals (alist-get 'visuals layout))
+        (process-put process 'rustel-audio nil)
         (process-put process 'rustel-events nil)
         (process-put process 'rustel-offset nil)
         (process-put process 'rustel-device-time nil)
@@ -426,12 +529,31 @@ Emacs timers can be delayed while Emacs is busy, so this is a target."
         (process-put process 'rustel-cps (alist-get 'cps batch))
         (process-put process 'rustel-device-time device-time)))))
 
+(defun rustel--handle-audio (process frame)
+  "Keep the newest valid UI AUDIO FRAME from PROCESS."
+  (let* ((generation (alist-get 'generation frame))
+         (sequence (alist-get 'sequence frame))
+         (old (process-get process 'rustel-audio))
+         (new-stream (or (null old)
+                         (not (equal (alist-get 'stream_id old)
+                                     (alist-get 'stream_id frame)))
+                         (not (equal (alist-get 'epoch old)
+                                     (alist-get 'epoch frame)))))
+         (old-sequence (and old (alist-get 'sequence old))))
+    (when (and (equal (alist-get 'version frame) 1)
+               (equal generation (process-get process 'rustel-generation))
+               (numberp sequence)
+               (or new-stream (not (numberp old-sequence)) (> sequence old-sequence)))
+      (process-put process 'rustel-audio frame))))
+
 (defun rustel--handle-record (process record)
   "Dispatch one decoded UI RECORD from PROCESS."
   (when-let ((layout (alist-get 'ui_layout record)))
     (rustel--handle-layout process layout))
   (when-let ((batch (alist-get 'ui_events record)))
-    (rustel--handle-events process batch)))
+    (rustel--handle-events process batch))
+  (when-let ((audio (alist-get 'ui_audio record)))
+    (rustel--handle-audio process audio)))
 
 (defun rustel--stdout-filter (process chunk)
   "Consume Rustel's newline-delimited UI protocol from PROCESS."
@@ -487,7 +609,7 @@ Emacs timers can be delayed while Emacs is busy, so this is a target."
       (let ((process rustel--process)
             (now (float-time)))
         (when (process-live-p process)
-          (rustel--refresh-pianoroll-overlays buffer process now))
+          (rustel--refresh-visual-overlays buffer process now))
         (when (and (process-live-p process)
                    (not (buffer-modified-p))
                    rustel--source-revision
@@ -621,7 +743,7 @@ Emacs timers can be delayed while Emacs is busy, so this is a target."
 
 ;;;###autoload
 (define-derived-mode rustel-mode js-mode "Rustel"
-  "Major mode for Rustel/Strudel scores with live playback and piano rolls.
+  "Major mode for Rustel/Strudel scores with live playback and inline visuals.
 
 \{rustel-mode-map}"
   (rustel--select-utf8-coding)
