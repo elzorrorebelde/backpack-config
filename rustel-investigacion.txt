@@ -119,6 +119,13 @@ El modo deriva de `js-mode`, se activa para `.strudel` y `.rustel`, y ofrece:
 
 La prueba real con Rustel 0.1.6 y salida silenciosa recibió generación 1, eventos y frames de audio. En el Emacs 30.2 gráfico, una prueba con `._pianoroll()` y `._scope()` creó dos overlays SVG; el scope recibió su slot con 512 muestras y la secuencia de audio llegó a 29. También pasaron compilación byte-code y las pruebas anteriores de Leaf/offsets.
 
+Diagnóstico del pequeño lag
+---------------------------
+
+Se instrumentó una ejecución silenciosa de dos segundos con el score `~/scope.strudel` y el Emacs gráfico 30.2. La construcción SVG de la pianoroll promedió ~2.3 ms por actualización. La del scope (512 muestras conectadas con segmentos SVG) promedió ~13.8 ms, con una llamada máxima de ~97 ms; se observaron dos GC durante esas llamadas. El callback completo llegó a ~98 ms en su máximo. Estas medidas cubren Elisp/construcción de imagen, no el tiempo total de rasterización/redisplay ni la salida física de audio.
+
+Esto apunta a trabajo síncrono del scope y pausas de GC en el mismo event loop como causa probable de los pequeños tirones, no a una rama especial para la última nota. El scope además recibe frames como máximo a ~30 Hz y el sink puede coalescer frames. La pianoroll mantiene su playhead a partir del reloj del dispositivo; el final lógico de la nota usa `duration_seconds`, que no incluye necesariamente toda la cola del sonido. Para separar retraso visual de cola acústica haría falta comparar una reproducción con scope desactivado y una con scope, además de medir el dispositivo real.
+
 Aún no implementado: Flymake/`rustel check`, `spectrum`, `punchcard`, `wordfall`, `spiral`, `pitchwheel`, controles `ui_control` para sliders, paneles de Studio y completado de referencia.
 
 Buffers sin archivo asociado
@@ -159,7 +166,18 @@ Siguientes pasos recomendados:
 
 El prototipo ahora consume `ui_layout.visuals` para `pianoroll` y `scope`/`tscope`, `ui_events` para notas/playhead y `ui_audio` para las muestras de scope. El benchmark de Chiply hace razonable apuntar a 60 FPS para el playhead y a la cadencia de 30 Hz para scope; todavía falta medir FPS sostenido del renderer Rustel completo bajo edición y en otras máquinas.
 
-6. Referencias
+6. Viabilidad de mover el renderer a un módulo compilado
+--------------------------------------------------------
+
+Es viable crear un dynamic module de Emacs en C, o implementado en Rust usando la ABI C de Emacs. El canal oficial es `emacs-module.h`: `emacs_module_init` registra funciones C invocables desde Lisp; en Emacs 30.2 el binario actual informa suffix `.so` para módulos. La interfaz pública que se encontró es C, no una ABI Rust estable, por lo que Rust necesitaría `extern "C"` o una capa wrapper.
+
+El módulo no dibujaría directamente en la ventana ni sustituiría el renderer de imágenes de Emacs. Una división sensata sería que el módulo procese las 512 muestras y construya una descripción SVG (idealmente una sola ruta/path, no 511 llamadas separadas), y que Lisp mantenga el timer, `ui_events`, overlays, `svg-image`/`create-image` y redisplay. La llamada al módulo es síncrona desde el hilo del intérprete de Emacs; la API de módulos solo puede interactuar con Emacs desde una llamada activa en un hilo de Emacs, no desde un worker arbitrario.
+
+Valor según el perfil actual: la construcción Elisp del piano roll promedió ~2.3 ms; la del scope con 512 segmentos, ~13.8 ms y tuvo un máximo de ~97 ms, con ciclos de GC en esa ruta. Eso hace que `scope` sea el candidato natural para optimizar, pero no demuestra todavía que haya que añadir C/Rust. Primero conviene probar una sola ruta SVG o downsampling/caching en Lisp, porque reduce asignaciones y nodos SVG sin introducir una biblioteca nativa. Si sigue perdiendo frames, un módulo para procesar/generar la ruta del scope es plausible; el rasterizado SVG y la redisplay continuarán del lado de Emacs.
+
+Costes del módulo: compilar y mantener binarios por plataforma/arquitectura, comprobar compatibilidad del tamaño/versionado de `emacs_env`, y cuidar GC/valores Lisp y salidas no locales. C es el camino de integración más directo; Rust es posible si se mantiene toda la frontera como C ABI.
+
+7. Referencias
 --------------
 
 Rustel v0.1.6:
@@ -178,3 +196,6 @@ Rustel v0.1.6:
 - Manual Emacs Lisp, timers: https://www.gnu.org/software/emacs/manual/html_node/elisp/Timers.html
 - Artículo Chiply, Emacs SVG Benchmark: https://www.chiply.dev/post-emacs-svg-benchmark
 - Harness reproducible del benchmark: https://github.com/chiply/.zetta.d/blob/main/svg-bench/svg-bench.el
+- Manual Emacs Lisp, módulos dinámicos: https://www.gnu.org/software/emacs/manual/html_node/elisp/Dynamic-Modules.html
+- Manual Emacs Lisp, funciones de módulo: https://www.gnu.org/software/emacs/manual/html_node/elisp/Module-Functions.html
+- Manual Emacs Lisp, inicialización/compatibilidad del módulo: https://www.gnu.org/software/emacs/manual/html_node/elisp/Module-Initialization.html
