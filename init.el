@@ -6,7 +6,7 @@
  diff-hl
 
  :completion
- (corfu auto-for-prog auto-for-text)
+ corfu
  (vertico quick repeat suspend)
  (consult eglot dir project-extra todo)
  orderless
@@ -117,3 +117,12 @@
 
 ;; Instapaper — guardar URLs
 (load-file (expand-file-name "instapaper.el" backpack-user-dir))
+
+(with-eval-after-load 'org-remark
+  (defun zorro/org-remark-notes-file ()
+    (let* ((current-project-dir (caddr (project-current))))
+      (if current-project-dir
+	  (expand-file-name "marginalia.org" current-project-dir)
+	"marginalia.org")))
+
+  (setq org-remark-notes-file-name #'zorro/org-remark-notes-file))
