@@ -1,6 +1,12 @@
 (leaf rustel-mode
   :load-path backpack-user-dir
-  :mode ("\\.\\(?:strudel\\|rustel\\)\\'" . rustel-mode))
+  :mode ("\\.\\(?:strudel\\|rustel\\)\\'" . rustel-mode)
+  :config
+  (with-eval-after-load 'eglot
+    (add-to-list 'eglot-server-programs
+                 '((rustel-mode :language-id "strudel") .
+                   ("rustel" "lsp" "--stdio")))
+    (add-hook 'rustel-mode-hook #'eglot-ensure)))
 
 (leaf playerctl
   :ensure t
